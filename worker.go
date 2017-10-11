@@ -1,70 +1,79 @@
 package worker
 
 import (
-	"log"
+	"fmt"
 	"sync"
+
+	"bitbucket.org/smartcast/sledgehammer-common/log"
 )
 
+type Id string
+type token struct{}
+
 type worker struct {
-	id                   string
-	rTokenOut, wTokenOut chan struct{}
-	rTokenIn, wTokenIn   chan struct{}
+	poolName             string
+	id                   int
+	rTokenOut, wTokenOut chan token
+	rTokenIn, wTokenIn   chan token
 	input, output        chan Work
-	f                    func(work Work) Work
+	f                    func(Id, Work) Work
 }
 
-func NewWorker(id string, input, output chan Work, f func(Work) Work) *worker {
+func newWorker(poolName string, id int, input, output chan Work, f func(Id, Work) Work) *worker {
 	return &worker{
+		poolName:  poolName,
 		id:        id,
-		rTokenOut: make(chan struct{}),
-		wTokenOut: make(chan struct{}),
+		rTokenOut: make(chan token, 1),
+		wTokenOut: make(chan token, 1),
 		input:     input,
 		output:    output,
 		f:         f,
 	}
 }
 
-func (self *worker) SetToken() {
-	go func() {
-		self.wTokenIn <- struct{}{}
-		self.rTokenIn <- struct{}{}
-	}()
+func (w *worker) setToken() {
+	w.rTokenIn <- token{}
+	w.wTokenIn <- token{}
 }
 
-func (self *worker) SetWire(rIn, wIn chan struct{}) {
-	self.rTokenIn = rIn
-	self.wTokenIn = wIn
+func (w *worker) setWire(rIn, wIn chan token) {
+	w.rTokenIn = rIn
+	w.wTokenIn = wIn
 }
 
-func (self *worker) GetWire() (rOut, wOut chan struct{}) {
-	return self.rTokenOut, self.wTokenOut
+func (w *worker) getWire() (rOut, wOut chan token) {
+	return w.rTokenOut, w.wTokenOut
 }
 
-func (self *worker) Run(wg *sync.WaitGroup) {
+func (w *worker) run(wg *sync.WaitGroup) {
 	defer wg.Done()
-	defer close(self.wTokenOut)
-	defer close(self.rTokenOut)
-	log.Printf("start %v", self.id)
-	defer log.Printf("stop %v", self.id)
+	defer close(w.wTokenOut)
+	defer close(w.rTokenOut)
+	log.Tracef("start worker %v", w.getId())
+	defer log.Tracef("stop worker %v", w.getId())
 	for {
-		workTodo := self.readInput()
+		workTodo := w.readInput()
 		if workTodo == nil {
 			break
 		}
-		workDone := self.f(workTodo)
-		self.writeOutput(workDone)
+		workDone := w.f(w.getId(), workTodo)
+		w.writeOutput(workDone)
 	}
 }
 
-func (self *worker) readInput() (work Work) {
-	<-self.rTokenIn
-	work = <-self.input
-	self.rTokenOut <- struct{}{}
+func (w *worker) getId() Id {
+	return Id(fmt.Sprintf("%v:%v", w.poolName, w.id))
+}
+
+func (w *worker) readInput() (work Work) {
+	<-w.rTokenIn
+	work = <-w.input
+	w.rTokenOut <- token{}
 	return
 }
 
-func (self *worker) writeOutput(work Work) {
-	<-self.wTokenIn
-	self.output <- work
-	self.wTokenOut <- struct{}{}
+func (w *worker) writeOutput(work Work) {
+	<-w.wTokenIn
+	w.output <- work
+	w.wTokenOut <- token{}
 }
